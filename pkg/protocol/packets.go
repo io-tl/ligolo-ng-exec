@@ -14,10 +14,14 @@ type Envelope struct {
 const (
 	MessageInfoRequest = uint8(iota)
 	MessageInfoReply
-	MessageCmdRequest
-	MessageCmdReply
 	MessageConnectRequest
 	MessageConnectResponse
+	MessageCmdRequest
+	MessageCmdReply
+	MessageFileRecvRequest
+	MessageFileRecvReply
+	MessageFileSendRequest
+	MessageFileSendReply
 	MessageHostPingRequest
 	MessageHostPingResponse
 	MessageListenerRequest // Start a listener
@@ -113,6 +117,24 @@ type ExecRequestPacket struct {
 }
 
 type ExecReponsePacket struct {
+	Response string
+}
+
+type MessageFileRecvRequestPacket struct {
+	File string
+}
+
+type MessageFileRecvResponsePacket struct {
+	Response string
+	Content  []byte
+}
+
+type MessageFileSendRequestPacket struct {
+	File    string
+	Content []byte
+}
+
+type MessageFileSendResponsePacket struct {
 	Response string
 }
 

@@ -2,16 +2,16 @@ package netstack
 
 import (
 	"fmt"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/header"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/network/ipv4"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/network/ipv6"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/stack"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/transport/icmp"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/transport/tcp"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/transport/udp"
+	"github.com/nicocha30/ligolo-ng/pkg/proxy/netstack/tun"
 	"github.com/sirupsen/logrus"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
-	"ligolo-ng/pkg/proxy/netstack/tun"
 	"sync"
 )
 
@@ -81,10 +81,15 @@ type NetStack struct {
 	sync.Mutex
 }
 
+type StackSettings struct {
+	TunName     string
+	MaxInflight int
+}
+
 // NewStack registers a new GVisor Network Stack
-func NewStack(tunName string, connPool *ConnPool) *NetStack {
+func NewStack(settings StackSettings, connPool *ConnPool) *NetStack {
 	ns := NetStack{pool: connPool}
-	ns.new(tunName)
+	ns.new(settings)
 	return &ns
 }
 
@@ -101,7 +106,7 @@ func (s *NetStack) SetConnPool(connPool *ConnPool) {
 }
 
 // New creates a new userland network stack (using Gvisor) that listen on a tun interface.
-func (s *NetStack) new(tunName string) *stack.Stack {
+func (s *NetStack) new(stackSettings StackSettings) *stack.Stack {
 
 	// Create a new gvisor userland network stack.
 	ns := stack.New(stack.Options{
@@ -125,7 +130,7 @@ func (s *NetStack) new(tunName string) *stack.Stack {
 	ns.SetICMPBurst(0)
 
 	// Forward TCP connections
-	tcpHandler := tcp.NewForwarder(ns, 0, 4096, func(request *tcp.ForwarderRequest) {
+	tcpHandler := tcp.NewForwarder(ns, 0, stackSettings.MaxInflight, func(request *tcp.ForwarderRequest) {
 		tcpConn := TCPConn{
 			EndpointID: request.ID(),
 			Request:    request,
@@ -171,9 +176,9 @@ func (s *NetStack) new(tunName string) *stack.Stack {
 	ns.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpHandler.HandlePacket)
 	ns.SetTransportProtocolHandler(udp.ProtocolNumber, udpHandler.HandlePacket)
 
-	linkEP, err := tun.Open(tunName)
+	linkEP, err := tun.Open(stackSettings.TunName)
 	if err != nil {
-		panic(fmt.Errorf("tun.Open: %v", err))
+		logrus.Fatalf("unable to create tun interface: (tun.Open %v), make sure you created the tun interface", err)
 	}
 	// Create a new NIC
 	if err := ns.CreateNIC(1, linkEP); err != nil {

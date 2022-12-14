@@ -2,7 +2,14 @@
 
 
 
-Modified version of excellent ligolo tool that use gvisor to use userland network stack, with command execution and service capability added 
+Modified version of excellent ligolo tool that use gvisor to use userland network stack.
+Additions :
+- compatibility with go 1.19
+- command execution 
+- service capability
+- upload file
+- download file
+- http proxy support ( basic and ntlm auth maybe in future)
 
 Original version :
 

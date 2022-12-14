@@ -58,7 +58,6 @@ func (d *LigoloDecoder) Decode() error {
 			panic(err)
 		}
 		d.Envelope.Payload = p
-
 	case MessageCmdRequest:
 		p := ExecRequestPacket{}
 		if err := gobdecoder.Decode(&p); err != nil {
@@ -66,8 +65,34 @@ func (d *LigoloDecoder) Decode() error {
 		}
 		d.Envelope.Payload = p
 
+	case MessageFileRecvReply:
+		p := MessageFileRecvResponsePacket{}
+		if err := gobdecoder.Decode(&p); err != nil {
+			panic(err)
+		}
+		d.Envelope.Payload = p
+	case MessageFileRecvRequest:
+		p := MessageFileRecvRequestPacket{}
+		if err := gobdecoder.Decode(&p); err != nil {
+			panic(err)
+		}
+		d.Envelope.Payload = p
+
+	case MessageFileSendReply:
+		p := MessageFileSendResponsePacket{}
+		if err := gobdecoder.Decode(&p); err != nil {
+			panic(err)
+		}
+		d.Envelope.Payload = p
+	case MessageFileSendRequest:
+		p := MessageFileSendRequestPacket{}
+		if err := gobdecoder.Decode(&p); err != nil {
+			panic(err)
+		}
+		d.Envelope.Payload = p
+
 	case MessageConnectRequest:
-		p := ExecReponsePacket{}
+		p := ConnectRequestPacket{}
 		if err := gobdecoder.Decode(&p); err != nil {
 			panic(err)
 		}

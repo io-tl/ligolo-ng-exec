@@ -3,15 +3,15 @@ package netstack
 import (
 	"bytes"
 	"errors"
+	"github.com/nicocha30/gvisor-ligolo/pkg/bufferv2"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/header"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/network/ipv4"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/stack"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/transport/icmp"
+	"github.com/nicocha30/gvisor-ligolo/pkg/tcpip/transport/raw"
+	"github.com/nicocha30/gvisor-ligolo/pkg/waiter"
 	"github.com/sirupsen/logrus"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/buffer"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/raw"
-	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // icmpResponder handle ICMP packets coming to gvisor/netstack.
@@ -29,8 +29,8 @@ func icmpResponder(s *NetStack) error {
 		return errors.New("could not bind raw endpoint")
 	}
 	go func() {
-		we, ch := waiter.NewChannelEntry(nil)
-		wq.EventRegister(&we, waiter.ReadableEvents)
+		we, ch := waiter.NewChannelEntry(waiter.ReadableEvents)
+		wq.EventRegister(&we)
 		for {
 			var buff bytes.Buffer
 			_, err := rawProto.Read(&buff, tcpip.ReadOptions{})
@@ -59,9 +59,10 @@ func icmpResponder(s *NetStack) error {
 					}
 
 					// Reconstruct a ICMP PacketBuffer from bytes.
-					view := buffer.NewViewFromBytes(buff.Bytes())
+
+					view := bufferv2.MakeWithData(buff.Bytes())
 					packetbuff := stack.NewPacketBuffer(stack.PacketBufferOptions{
-						Data:               view.ToVectorisedView(),
+						Payload:            view,
 						ReserveHeaderBytes: hlen,
 					})
 
@@ -111,15 +112,16 @@ func ProcessICMP(nstack *stack.Stack, pkt *stack.PacketBuffer) {
 		return
 	}
 
-	iph := header.IPv4(pkt.NetworkHeader().View())
+	iph := header.IPv4(pkt.NetworkHeader().Slice())
 	var newOptions header.IPv4Options
 
 	// TODO(b/112892170): Meaningfully handle all ICMP types.
 	switch h.Type() {
 	case header.ICMPv4Echo:
 
-		replyData := pkt.Data().AsRange().ToOwnedView()
-		ipHdr := header.IPv4(pkt.NetworkHeader().View())
+		replyData := stack.PayloadSince(pkt.TransportHeader())
+		defer replyData.Release()
+		ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
 
 		localAddressBroadcast := pkt.NetworkPacketInfo.LocalAddressBroadcast
 
@@ -128,7 +130,10 @@ func ProcessICMP(nstack *stack.Stack, pkt *stack.PacketBuffer) {
 
 		// Take the base of the incoming request IP header but replace the options.
 		replyHeaderLength := uint8(header.IPv4MinimumSize + len(newOptions))
-		replyIPHdr := header.IPv4(append(iph[:header.IPv4MinimumSize:header.IPv4MinimumSize], newOptions...))
+		replyIPHdrView := bufferv2.NewView(int(replyHeaderLength))
+		replyIPHdrView.Write(iph[:header.IPv4MinimumSize])
+		replyIPHdrView.Write(newOptions)
+		replyIPHdr := header.IPv4(replyIPHdrView.AsSlice())
 		replyIPHdr.SetHeaderLength(replyHeaderLength)
 
 		// As per RFC 1122 section 3.2.1.3, when a host sends any datagram, the IP
@@ -150,17 +155,18 @@ func ProcessICMP(nstack *stack.Stack, pkt *stack.PacketBuffer) {
 		replyIPHdr.SetDestinationAddress(r.RemoteAddress())
 		replyIPHdr.SetTTL(r.DefaultTTL())
 
-		replyICMPHdr := header.ICMPv4(replyData)
+		replyICMPHdr := header.ICMPv4(replyData.AsSlice())
 		replyICMPHdr.SetType(header.ICMPv4EchoReply)
 		replyICMPHdr.SetChecksum(0)
-		replyICMPHdr.SetChecksum(^header.Checksum(replyData, 0))
+		replyICMPHdr.SetChecksum(^header.Checksum(replyData.AsSlice(), 0))
 
-		replyVV := buffer.View(replyIPHdr).ToVectorisedView()
-		replyVV.AppendView(replyData)
+		replyBuf := bufferv2.MakeWithView(replyIPHdrView)
+		replyBuf.Append(replyData.Clone())
 		replyPkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			ReserveHeaderBytes: int(r.MaxHeaderLength()),
-			Data:               replyVV,
+			Payload:            replyBuf,
 		})
+
 		replyPkt.TransportProtocolNumber = header.ICMPv4ProtocolNumber
 
 		if err := r.WriteHeaderIncludedPacket(replyPkt); err != nil {

